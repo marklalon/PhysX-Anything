@@ -224,16 +224,28 @@ def get_logger(filename, verbosity=1, name=None):
 
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--image", type=str, required=True,
+                    help="输入图片路径")
+parser.add_argument("--output_dir", type=str, default="output",
+                    help="输出目录")
 parser.add_argument("--index", type=int, default=0)
 parser.add_argument("--range", type=int, default=2000)
 args = parser.parse_args()
-basepath='./test_demo'
-namelist=os.listdir(basepath)
+
+image_name = os.path.splitext(os.path.basename(args.image))[0]
+basepath = os.path.join(args.output_dir, image_name)
+
+if not os.path.exists(basepath):
+    print(f"[ERROR] 输出目录不存在: {basepath}")
+    print("[ERROR] 请先运行 1_vlm_demo.py 和 2_decoder.py")
+    exit(1)
+
+namelist = [image_name]
 logger = get_logger(os.path.join('exp_split'+str(args.index)+'.log'),verbosity=1)
-logger.info('start')
+logger.info(f'处理: {image_name}')
 
 for name in namelist:
-    tmpdir=os.path.join(basepath,name)
+    tmpdir = basepath  # 直接使用 basepath，因为已经是正确的输出目录
     if os.path.exists(os.path.join(tmpdir,'sample.glb')):
         os.makedirs(os.path.join(tmpdir), exist_ok=True)
         os.makedirs(os.path.join(tmpdir,'objs'), exist_ok=True)

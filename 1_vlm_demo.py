@@ -114,7 +114,7 @@ def generate_save(model,messages,save_dir,save_name='test',save=True):
     inputs = inputs.to(model.device)
 
 
-    generated_ids = model.generate(**inputs, do_sample=False,temperature=0,max_length=32768)
+    generated_ids = model.generate(**inputs, do_sample=False, max_length=32768)
     generated_ids_trimmed = [
         out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
     ]
@@ -129,41 +129,50 @@ def generate_save(model,messages,save_dir,save_name='test',save=True):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--demo_path", type=str, default='./demo')
-    parser.add_argument("--save_part_ply", type=bool, default=True)
-    parser.add_argument("--remove_bg", type=bool, default=False)
+    parser.add_argument("--image", type=str, required=True,
+                        help="输入图片路径（如 ./demo/foo.png）")
+    parser.add_argument("--save_part_ply", action='store_true', default=True,
+                        help="保存部件 PLY 文件")
+    parser.add_argument("--remove_bg", action='store_true', default=False,
+                        help="移除背景")
     parser.add_argument("--ckpt", type=str, default='./pretrain/vlm')
-    parser.add_argument("--load_in_8bit", type=bool, default=False)
-    parser.add_argument("--image", type=str, default=None,
-                        help="仅处理指定文件名的图片（如 foo.png），不指定则处理 demo_path 中所有图片")
+    parser.add_argument("--load_in_8bit", action='store_true', default=True,
+                        help="使用 8-bit 量化（默认开启）")
+    parser.add_argument("--full_precision", action='store_true', default=False,
+                        help="禁用 8-bit 量化，使用 BF16 全精度")
     args = parser.parse_args()
 
-    basepath=args.demo_path
-    namelist=os.listdir(basepath)
-    if args.image:
-        namelist = [args.image]
+    image_path = args.image
+    name = os.path.basename(image_path)
     
+    print(f"[INFO] 输入图片: {image_path}")
+    print(f"[INFO] 输出目录: output/{os.path.splitext(name)[0]}")
 
-
-    if args.load_in_8bit:
+    use_8bit = args.load_in_8bit and not args.full_precision
+    
+    if use_8bit:
+        print("[INFO] 使用 8-bit 量化模式加载模型...")
         quant_cfg = BitsAndBytesConfig(load_in_8bit=True)
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                     args.ckpt,
                     quantization_config=quant_cfg,
-                    attn_implementation="sdpa",
+                    attn_implementation="flash_attention_2",
                     device_map="auto",
                 )
+        print("[INFO] 模型加载完成 (8-bit 量化)")
     else:
+        print("[INFO] 使用 BF16 模式加载模型...")
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                     args.ckpt,
                     torch_dtype=torch.bfloat16,
-                    attn_implementation="sdpa",
+                    attn_implementation="flash_attention_2",
                     device_map="auto",
                 )
+        print("[INFO] 模型加载完成 (BF16)")
     min_pixels = 65536
     max_pixels = 262144
 
-    processor = AutoProcessor.from_pretrained(args.ckpt, min_pixels=min_pixels, max_pixels=max_pixels)
+    processor = AutoProcessor.from_pretrained(args.ckpt, min_pixels=min_pixels, max_pixels=max_pixels, use_fast=True)
     if not processor.chat_template and hasattr(processor, 'tokenizer') and processor.tokenizer.chat_template:
         processor.chat_template = processor.tokenizer.chat_template
     processor.image_processor.min_pixels=min_pixels
@@ -171,60 +180,57 @@ if __name__ == '__main__':
     processor.image_processor.size["shortest_edge"]=min_pixels
     processor.image_processor.size["longest_edge"]=max_pixels
 
-    for name in namelist:
+    # 设置输出目录
+    output_dir = 'output'
+    os.makedirs(output_dir, exist_ok=True)
 
+    save_dir = os.path.join(output_dir, os.path.splitext(name)[0])
+    os.makedirs(save_dir, exist_ok=True)
 
+    with open(os.path.join('./dataset/overall_prompt.txt'), "r", encoding="utf-8") as f:
+        basicqu = f.read()
 
-        save_dir=os.path.join('test_demo',name[:-4])
-        os.makedirs(os.path.join(save_dir), exist_ok=True)
+    input_image = Image.open(image_path)
+    im_resized = input_image.resize((512, 512), Image.LANCZOS)
 
-        image_path = os.path.join(basepath,name)
+    if args.remove_bg:
+        im_resized = remove(im_resized)
 
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "image": im_resized.convert("RGB"),
+                },
+                {"type": "text", "text": basicqu},
+            ],
+        }
+    ]
 
-
-        with open(os.path.join('./dataset/overall_prompt.txt'), "r", encoding="utf-8") as f:
-            basicqu = f.read()
-
-        input_image = Image.open(image_path)
-        im_resized = input_image.resize((512, 512), Image.LANCZOS)
-
-        if args.remove_bg:
-            im_resized = remove(im_resized)
-
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "image": im_resized.convert("RGB"),
-                    },
-                    {"type": "text", "text": basicqu},
-                ],
-            }
-        ]
-        
+    basicoutput = generate_save(model, messages, save_dir, 'basic_info')
+    print(f"[INFO] 基本信息生成完成")
     
+    index = 0
+    while 'l_' + str(index) in basicoutput:
+        index += 1
+    print(f"[INFO] 检测到 {index} 个部件")
 
-        basicoutput=generate_save(model,messages,save_dir,'basic_info')
-        index=0
-        while 'l_'+str(index) in basicoutput:
-            index+=1
+    allcoord = []
+    for part in range(index):
+        print(f"[INFO] 处理部件 {part + 1}/{index}...")
+        question = "Based on the structured description of l_" + str(part) + ", generate its 3D voxel grid in the following format (voxel grid=32, use numbers from 0 to 32767, merge maximal consecutive runs: 199...216 -> 199-216): 184 198 199-216 230-237..."
+        messages1 = addmessage(messages, basicoutput, question)
+        output1 = generate_save(model, messages1, save_dir, 'coord_' + str(part), save=True)
+        idx_back = dash_str_to_ints(output1)
+        voxels_back = voxel_decode(idx_back)
+        allcoord.append(voxels_back)
+        np.save(os.path.join(save_dir, 'ind_' + str(part) + '.npy'), voxels_back)
+        if args.save_part_ply:
+            partply = trimesh.points.PointCloud(voxels_back)
+            partply.export(os.path.join(save_dir, 'ind_' + str(part) + '.ply'))
 
-        allcoord=[]
-        for part in range(index):
-
-            question="Based on the structured description of l_"+str(part)+", generate its 3D voxel grid in the following format (voxel grid=32, use numbers from 0 to 32767, merge maximal consecutive runs: 199...216 -> 199-216): 184 198 199-216 230-237..."
-            messages1=addmessage(messages,basicoutput,question)
-            output1=generate_save(model,messages1,save_dir,'coord_'+str(part),save=True)
-            print(len(messages1))
-            idx_back = dash_str_to_ints(output1)
-            voxels_back = voxel_decode(idx_back)
-            allcoord.append(voxels_back)
-            np.save(os.path.join(save_dir,'ind_'+str(part)+'.npy'),voxels_back)
-            if args.save_part_ply:
-                partply=trimesh.points.PointCloud(voxels_back)
-                partply.export(os.path.join(save_dir,'ind_'+str(part)+'.ply'))
-
-        np.save(os.path.join(save_dir,'allind.npy'),np.concatenate(allcoord))
+    np.save(os.path.join(save_dir, 'allind.npy'), np.concatenate(allcoord))
+    print(f"[INFO] VLM 处理完成！结果保存在: {save_dir}")
 

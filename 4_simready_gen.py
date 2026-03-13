@@ -1007,8 +1007,9 @@ def extract_body_to_world(root: ET.Element, body_name: str) -> bool:
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description="Convert urdf format to simplified format")
+    parser.add_argument('--image', type=str, required=True, help='输入图片路径')
+    parser.add_argument('--output_dir', type=str, default='output', help='输出目录')
     parser.add_argument('--voxel_define', type=int, default=32, help='Resolution of the voxel.')
-    parser.add_argument('--basepath', type=str, default='./test_demo', help='Path of the voxel.')
     parser.add_argument('--process', type=int, default=0, help='whether use postprocess.')
     parser.add_argument('--fixed_base', type=int, default=0, help='whether fix the basement of object in mjcf.')
     parser.add_argument('--deformable', type=int, default=0, help='whether introduce deformable objects in mjcf.')
@@ -1018,8 +1019,16 @@ if __name__ == '__main__':
 
     voxel_define=args.voxel_define
     
-    basepath=args.basepath
-    namelist=os.listdir(basepath)
+    image_name = os.path.splitext(os.path.basename(args.image))[0]
+    basepath = args.output_dir
+    
+    if not os.path.exists(os.path.join(basepath, image_name, 'objs')):
+        print(f"[ERROR] 找不到分割输出: {os.path.join(basepath, image_name, 'objs')}")
+        print("[ERROR] 请先运行 1_vlm_demo.py, 2_decoder.py 和 3_split.py")
+        exit(1)
+    
+    namelist = [image_name]
+    logger.info(f'处理: {image_name}')
 
     for filename in namelist:
         logger.info('begin: '+filename)
