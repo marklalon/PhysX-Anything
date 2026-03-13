@@ -1,4 +1,4 @@
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
 from qwen_vl_utils import process_vision_info
 import torch
 import base64
@@ -133,23 +133,39 @@ if __name__ == '__main__':
     parser.add_argument("--save_part_ply", type=bool, default=True)
     parser.add_argument("--remove_bg", type=bool, default=False)
     parser.add_argument("--ckpt", type=str, default='./pretrain/vlm')
+    parser.add_argument("--load_in_8bit", type=bool, default=False)
+    parser.add_argument("--image", type=str, default=None,
+                        help="仅处理指定文件名的图片（如 foo.png），不指定则处理 demo_path 中所有图片")
     args = parser.parse_args()
 
     basepath=args.demo_path
     namelist=os.listdir(basepath)
+    if args.image:
+        namelist = [args.image]
     
 
 
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                args.ckpt,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                device_map="auto",
-            )
+    if args.load_in_8bit:
+        quant_cfg = BitsAndBytesConfig(load_in_8bit=True)
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    args.ckpt,
+                    quantization_config=quant_cfg,
+                    attn_implementation="sdpa",
+                    device_map="auto",
+                )
+    else:
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    args.ckpt,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="sdpa",
+                    device_map="auto",
+                )
     min_pixels = 65536
     max_pixels = 262144
 
-    processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct", min_pixels=min_pixels, max_pixels=max_pixels)
+    processor = AutoProcessor.from_pretrained(args.ckpt, min_pixels=min_pixels, max_pixels=max_pixels)
+    if not processor.chat_template and hasattr(processor, 'tokenizer') and processor.tokenizer.chat_template:
+        processor.chat_template = processor.tokenizer.chat_template
     processor.image_processor.min_pixels=min_pixels
     processor.image_processor.max_pixels=max_pixels
     processor.image_processor.size["shortest_edge"]=min_pixels

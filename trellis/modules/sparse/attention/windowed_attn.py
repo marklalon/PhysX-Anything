@@ -8,6 +8,8 @@ if ATTN == 'xformers':
     import xformers.ops as xops
 elif ATTN == 'flash_attn':
     import flash_attn
+elif ATTN == 'sdpa':
+    from torch.nn.functional import scaled_dot_product_attention as _sdpa
 else:
     raise ValueError(f"Unknown attention module: {ATTN}")
 
@@ -110,6 +112,10 @@ def sparse_windowed_scaled_dot_product_self_attention(
             out = xops.memory_efficient_attention(q, k, v)          # [B, N, H, C]
         elif ATTN == 'flash_attn':
             out = flash_attn.flash_attn_qkvpacked_func(qkv_feats)   # [B, N, H, C]
+        elif ATTN == 'sdpa':
+            q, k, v = qkv_feats.unbind(dim=2)                       # [B, N, H, C]
+            out = _sdpa(q.permute(0,2,1,3), k.permute(0,2,1,3), v.permute(0,2,1,3))  # [B, H, N, C]
+            out = out.permute(0,2,1,3)                               # [B, N, H, C]
         else:
             raise ValueError(f"Unknown attention module: {ATTN}")
         out = out.reshape(B * N, H, C)                              # [M, H, C]
@@ -125,6 +131,27 @@ def sparse_windowed_scaled_dot_product_self_attention(
             cu_seqlens = torch.cat([torch.tensor([0]), torch.cumsum(torch.tensor(seq_lens), dim=0)], dim=0) \
                         .to(qkv.device).int()
             out = flash_attn.flash_attn_varlen_qkvpacked_func(qkv_feats, cu_seqlens, max(seq_lens)) # [M, H, C]
+        elif ATTN == 'sdpa':
+            max_sl = max(seq_lens)
+            B2 = len(seq_lens)
+            q2, k2, v2 = qkv_feats.unbind(dim=1)                   # each [M, H, C]
+            q_pad = q2.new_zeros(B2, H, max_sl, C)
+            k_pad = k2.new_zeros(B2, H, max_sl, C)
+            v_pad = v2.new_zeros(B2, H, max_sl, C)
+            off = 0
+            for i, sl in enumerate(seq_lens):
+                q_pad[i, :, :sl] = q2[off:off+sl].permute(1, 0, 2)
+                k_pad[i, :, :sl] = k2[off:off+sl].permute(1, 0, 2)
+                v_pad[i, :, :sl] = v2[off:off+sl].permute(1, 0, 2)
+                off += sl
+            kv_mask = q2.new_zeros(B2, 1, 1, max_sl)
+            for i, sl in enumerate(seq_lens):
+                kv_mask[i, 0, 0, sl:] = float('-inf')
+            out_pad = _sdpa(q_pad, k_pad, v_pad, attn_mask=kv_mask) # [B2, H, max_sl, C]
+            parts = []
+            for i, sl in enumerate(seq_lens):
+                parts.append(out_pad[i, :, :sl].permute(1, 0, 2))   # [sl, H, C]
+            out = torch.cat(parts, dim=0)                            # [M, H, C]
 
     out = out[bwd_indices]      # [T, H, C]
 

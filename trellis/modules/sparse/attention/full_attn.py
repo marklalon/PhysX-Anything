@@ -7,6 +7,8 @@ if ATTN == 'xformers':
     import xformers.ops as xops
 elif ATTN == 'flash_attn':
     import flash_attn
+elif ATTN == 'sdpa':
+    from torch.nn.functional import scaled_dot_product_attention as _sdpa
 else:
     raise ValueError(f"Unknown attention module: {ATTN}")
 
@@ -206,6 +208,38 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
             out = flash_attn.flash_attn_varlen_kvpacked_func(q, kv, cu_seqlens_q, cu_seqlens_kv, max(q_seqlen), max(kv_seqlen))
         elif num_all_args == 3:
             out = flash_attn.flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max(q_seqlen), max(kv_seqlen))
+    elif ATTN == 'sdpa':
+        # Convert variable-length flat [T, H, C] to padded [N, H, max_seqlen, C] for sdpa
+        N = len(q_seqlen)
+        max_q = max(q_seqlen)
+        max_kv = max(kv_seqlen)
+        if num_all_args == 1:
+            q, k, v = qkv.unbind(dim=1)   # each [T, H, C]
+        elif num_all_args == 2:
+            k, v = kv.unbind(dim=1)
+        H_q, C_q = q.shape[1], q.shape[2]
+        H_v, C_v = v.shape[1], v.shape[2]
+        q_pad = q.new_zeros(N, H_q, max_q, C_q)
+        k_pad = k.new_zeros(N, H_q, max_kv, C_q)
+        v_pad = v.new_zeros(N, H_v, max_kv, C_v)
+        q_off = kv_off = 0
+        for i in range(N):
+            ql, kvl = q_seqlen[i], kv_seqlen[i]
+            q_pad[i, :, :ql] = q[q_off:q_off+ql].permute(1, 0, 2)
+            k_pad[i, :, :kvl] = k[kv_off:kv_off+kvl].permute(1, 0, 2)
+            v_pad[i, :, :kvl] = v[kv_off:kv_off+kvl].permute(1, 0, 2)
+            q_off += ql; kv_off += kvl
+        kv_mask = torch.zeros(N, 1, 1, max_kv, device=device, dtype=torch.bool)
+        for i in range(N):
+            kv_mask[i, 0, 0, :kv_seqlen[i]] = True
+        attn_mask = torch.where(kv_mask,
+                                q.new_zeros(N, 1, 1, max_kv),
+                                q.new_full((N, 1, 1, max_kv), float('-inf')))
+        out_pad = _sdpa(q_pad, k_pad, v_pad, attn_mask=attn_mask)  # [N, H, max_q, C_v]
+        parts = []
+        for i in range(N):
+            parts.append(out_pad[i, :, :q_seqlen[i]].permute(1, 0, 2))  # [ql, H, C_v]
+        out = torch.cat(parts, dim=0)  # [T_Q, H, C_v]
     else:
         raise ValueError(f"Unknown attention module: {ATTN}")
     
